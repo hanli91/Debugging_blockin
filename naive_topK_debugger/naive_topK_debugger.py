@@ -108,7 +108,7 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=200, 
 
     indexed_candidate_set = candidate_set.set_index([rtable_key, ltable_key], drop=False)
     candidate_index_key_set = set(indexed_candidate_set[rtable_key])
-    print candidate_index_key_set
+    #print candidate_index_key_set
 
     # Generate record lists
     lrecord_list = get_tokenized_table(ltable, feature_list)
@@ -131,29 +131,47 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=200, 
     generate_prefix_events(lrecord_list, lprefix_events)
     generate_prefix_events(rrecord_list, rprefix_events)
 
+    perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events, None)
+
     return None;
 
 
 def perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events, candidates):
-    topK_heap = []
+    topK_heap = [0]
     inverted_index = {}
+    compared_dict = {}
 
-    while topK_heap[0] < lprefix_events[0][3] and len(lprefix_events) > 0:
+    while topK_heap[0] < lprefix_events[0][2] and len(lprefix_events) > 0:
         '''TODO(hanli): should consider rprefix_events size 0'''
         inc_inverted_index = {}
-        while lprefix_events[0][3] <= rprefix_events[0][3]:
+        while lprefix_events[0][2] <= rprefix_events[0][2]:
             r_pre_event = hq.heappop(rprefix_events)
             key = rrecord_list[r_pre_event[0]][r_pre_event[1]]
-            if not inverted_index.has_key(key):
+            if key not in inverted_index:
                 inc_inverted_index[key] = set()
-            else:
-                inc_inverted_index[key].add(r_pre_event[0])
+            inc_inverted_index[key].add(r_pre_event[0])
             if r_pre_event[2] > rprefix_events[0][2]:
                 break;
-        #while lprefix_events[0][3] > rprefix_events[0][3]:
-        #    pass
+        print inc_inverted_index
+        while lprefix_events[0][2] > rprefix_events[0][2]:
+            potential_match_set = set()
+            l_pre_event = hq.heappop(lprefix_events)
+            for i in range(l_pre_event[1]):
+                token = lrecord_list[l_pre_event[0]][i]
+                if token in inc_inverted_index:
+                    potential_match_set = potential_match_set.union(inc_inverted_index[token])
+            new_token = lrecord_list[l_pre_event[0]][l_pre_event[1]]
+            if new_token in inverted_index:
+                potential_match_set = potential_match_set.union(inverted_index[new_token])
+            print potential_match_set
 
-    pass
+        for key in inc_inverted_index:
+            if key in inverted_index:
+                inverted_index[key] = inverted_index[key].union(inc_inverted_index[key])
+            else:
+                inverted_index[key] = inc_inverted_index.copy()
+
+    return topK_heap
 
 
 def generate_prefix_events(record_list, prefix_events):

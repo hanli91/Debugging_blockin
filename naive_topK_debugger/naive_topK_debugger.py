@@ -108,6 +108,7 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=200, 
 
     indexed_candidate_set = candidate_set.set_index([rtable_key, ltable_key], drop=False)
     candidate_index_key_set = set(indexed_candidate_set[rtable_key])
+    print candidate_index_key_set
 
     # Generate record lists
     lrecord_list = get_tokenized_table(ltable, feature_list)
@@ -121,8 +122,8 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=200, 
     # Sort each record by the token global order
     sort_record_tokens_by_global_order(lrecord_list, order_dict)
     sort_record_tokens_by_global_order(rrecord_list, order_dict)
-    print lrecord_list[1: 6]
-    print rrecord_list[1: 6]
+    # print lrecord_list[1: 6]
+    # print rrecord_list[1: 6]
 
     #Generate prefix events
     lprefix_events = []
@@ -133,7 +134,25 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=200, 
     return None;
 
 
-def perform_sim_join():
+def perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events, candidates):
+    topK_heap = []
+    inverted_index = {}
+
+    while topK_heap[0] < lprefix_events[0][3] and len(lprefix_events) > 0:
+        '''TODO(hanli): should consider rprefix_events size 0'''
+        inc_inverted_index = {}
+        while lprefix_events[0][3] <= rprefix_events[0][3]:
+            r_pre_event = hq.heappop(rprefix_events)
+            key = rrecord_list[r_pre_event[0]][r_pre_event[1]]
+            if not inverted_index.has_key(key):
+                inc_inverted_index[key] = set()
+            else:
+                inc_inverted_index[key].add(r_pre_event[0])
+            if r_pre_event[2] > rprefix_events[0][2]:
+                break;
+        #while lprefix_events[0][3] > rprefix_events[0][3]:
+        #    pass
+
     pass
 
 
@@ -352,7 +371,7 @@ def main():
     ltable = mg.read_csv('../datasets/books/BN_small.csv', key='id')
     rtable = mg.read_csv('../datasets/books/amazon_books_small.csv', key='id')
     blocker = mg.AttrEquivalenceBlocker()
-    candidate_set = blocker.block_tables(ltable, rtable, 'authors', 'authors')
+    candidate_set = blocker.block_tables(ltable, rtable, 'publisher', 'publisher')
     pred_table = naive_topK_debug_blocker(ltable, rtable, candidate_set)
 
 if __name__ == "__main__":

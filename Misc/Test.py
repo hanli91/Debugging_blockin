@@ -4,6 +4,7 @@
 import heapq as hq
 import numpy
 import pandas as pd
+import math
 import functools
 
 import logging
@@ -17,7 +18,7 @@ from collections import defaultdict
 from operator import attrgetter
 
 
-def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=200, field_corres_list=None):
+def test_feature_selection(ltable, rtable, candidate_set, pred_list_size=200, field_corres_list=None):
     """
     Debug the blocker. The basic idea is trying to suggest the user a list of record pairs
     out of the candidate set with high (document) jaccard similarity. The object of similarity
@@ -103,49 +104,72 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=200, 
     # logging.info('\nSelected fields for concatenation:\n' + str([(ltable_filtered.columns[i],
     #  rtable_filtered.columns[i]) for i in feature_list]))
 
-    ltable_key = candidate_set.get_property('foreign_key_ltable')
-    rtable_key = candidate_set.get_property('foreign_key_rtable')
+    #for column in ltable_filtered:
+    #    print column, \
+    #        calc_field_mutual_info(list(ltable_filtered['title']), list(ltable_filtered[column])), \
+    #        calc_field_mutual_info(list(rtable_filtered['title']), list(rtable_filtered[column]))
 
-    ###indexed_candidate_set = candidate_set.set_index([rtable_key, ltable_key], drop=False)
-    ###candidate_index_key_set = set(indexed_candidate_set[rtable_key])
-    #print candidate_index_key_set
+    select_field_by_mutual_info(ltable_filtered, 'title', 'id')
+    select_field_by_mutual_info(rtable_filtered, 'title', 'id')
 
-    logging.info('\nTokenizing records')
-    # Generate record lists
-    lrecord_list = get_tokenized_table(ltable, feature_list)
-    rrecord_list = get_tokenized_table(rtable, feature_list)
-
-    logging.info('\nBuilding token global order')
-    # Build token global order
-    order_dict = {}
-    build_global_token_order(lrecord_list, order_dict)
-    build_global_token_order(rrecord_list, order_dict)
-
-    logging.info('\nSorting tables')
-    # Sort each record by the token global order
-    sort_record_tokens_by_global_order(lrecord_list, order_dict)
-    sort_record_tokens_by_global_order(rrecord_list, order_dict)
-    # print lrecord_list[1: 6]
-    # print rrecord_list[1: 6]
-
-    logging.info('\nGenerating prefix events')
-    #Generate prefix events
-    lprefix_events = []
-    rprefix_events = []
-    generate_prefix_events(lrecord_list, lprefix_events)
-    generate_prefix_events(rrecord_list, rprefix_events)
-
-    logging.info('\nPerforming sim join')
-    topK_heap = [(-1, -1, -1)]
-    topK_heap = perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events, None, topK_heap, pred_list_size)
-
-    topK_heap = sorted(topK_heap, key=lambda tup: tup[0], reverse=True)
-    for tuple in topK_heap:
-        #print tuple, list(ltable.ix[tuple[1]]), list(rtable.ix[tuple[2]])
-        print tuple, list(lrecord_list[tuple[1]]), list(rrecord_list[tuple[2]])
-    logging.info('\nFinishing sim join')
 
     return None
+
+
+def select_field_by_mutual_info(table_filtered, start_field, table_key):
+    selected_list = [start_field]
+    table_columns = []
+    for column in table_filtered:
+            table_columns.append(column)
+    table_columns.remove(start_field)
+    table_columns.remove(table_key)
+
+    while len(table_columns) != 0:
+        new_column = ''
+        new_mi = float('-inf')
+        for column in table_columns:
+            for selected in selected_list:
+                cur_mi = calc_field_mutual_info(list(table_filtered[column]), list(table_filtered[selected]))
+                if cur_mi > new_mi:
+                    new_mi = cur_mi
+                    new_column = column
+        if new_mi > 0:
+            selected_list.append(new_column)
+        table_columns.remove(new_column)
+        print selected_list
+
+
+def calc_field_mutual_info(lfield_list, rfield_list):
+    pair_dict = {}
+    ldict = {}
+    rdict = {}
+    for i in range(len(lfield_list)):
+        if lfield_list[i] not in ldict:
+            ldict[lfield_list[i]] = 1
+        ldict[lfield_list[i]] += 1
+
+        if rfield_list[i] not in rdict:
+            rdict[rfield_list[i]] = 1
+        rdict[rfield_list[i]] += 1
+
+        if lfield_list[i] not in pair_dict:
+            pair_dict[lfield_list[i]] = {}
+
+        rcompanion_dict = pair_dict[lfield_list[i]]
+        if rfield_list[i] in rcompanion_dict:
+            rcompanion_dict[rfield_list[i]] += 1
+        else:
+            rcompanion_dict[rfield_list[i]] = 1
+
+    mi = 0
+    length = len(lfield_list)
+    for lkey in pair_dict:
+        for rkey in pair_dict[lkey]:
+            numer = pair_dict[lkey][rkey] * 1.0 / length
+            denom = ldict[lkey] * 1.0 / length * rdict[rkey] / length
+            mi +=  numer * math.log(numer / denom)
+
+    return mi
 
 
 def perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events, candidates, topK_heap, pred_list_size):
@@ -430,6 +454,7 @@ def select_features(ltable, rtable):
             rank_list.pop(lkey_index)
 
     rank_list = sorted(rank_list, key=attrgetter('weight'), reverse=True)
+    print rank_list
     rank_index_list = []
     num_selected_fields = 0
     if len(rank_list) <= 3:
@@ -464,7 +489,7 @@ def main():
     #blocker = mg.AttrEquivalenceBlocker()
     #candidate_set = blocker.block_tables(ltable, rtable, 'pubYear', 'pubYear')
     candidate_set = MTable()
-    pred_table = naive_topK_debug_blocker(ltable, rtable, candidate_set)
+    pred_table = test_feature_selection(ltable, rtable, candidate_set)
 
 if __name__ == "__main__":
     main()

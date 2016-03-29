@@ -6,6 +6,8 @@ import numpy
 import pandas as pd
 import functools
 
+import time
+
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
@@ -16,10 +18,8 @@ from collections import namedtuple
 from collections import defaultdict
 from operator import attrgetter
 
-import time
 
-
-def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=100, field_corres_list=None):
+def iterative_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=100, field_corres_list=None):
     """
     Debug the blocker. The basic idea is trying to suggest the user a list of record pairs
     out of the candidate set with high (document) jaccard similarity. The object of similarity
@@ -92,7 +92,6 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=100, 
 
     # Get field filtered new table.
     ltable_filtered, rtable_filtered = get_filtered_table(ltable, rtable, corres_list)
-
     # Select features.
     """TODO(hanli): currently we don't select the key fields even if they have the largest score.
     # This is because the values of the key field could be simply domain-specific serial numbers,
@@ -104,6 +103,9 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=100, 
                             'Please check if all table fields are numeric types.')
     # logging.info('\nSelected fields for concatenation:\n' + str([(ltable_filtered.columns[i],
     #  rtable_filtered.columns[i]) for i in feature_list]))
+
+    # Build field_index_list for removing field
+    field_index_list = range(len(feature_list))
 
     ltable_key = candidate_set.get_property('foreign_key_ltable')
     rtable_key = candidate_set.get_property('foreign_key_rtable')
@@ -122,6 +124,7 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=100, 
     order_dict = {}
     build_global_token_order(lrecord_list, order_dict)
     build_global_token_order(rrecord_list, order_dict)
+    #print lrecord_list
 
     logging.info('\nSorting tables')
     # Sort each record by the token global order
@@ -130,31 +133,67 @@ def naive_topK_debug_blocker(ltable, rtable, candidate_set, pred_list_size=100, 
     # print lrecord_list[1: 6]
     # print rrecord_list[1: 6]
 
-    logging.info('\nGenerating prefix events')
-    #Generate prefix events
-    lprefix_events = []
-    rprefix_events = []
-    generate_prefix_events(lrecord_list, lprefix_events)
-    generate_prefix_events(rrecord_list, rprefix_events)
+    #removed_field = -1
+    #remained_fields = list(field_index_list)
+    #if removed_field in field_index_list:
+    #    remained_fields.remove(removed_field)
+    #topK_heap, compared_dict = run_iteration(lrecord_list, rrecord_list, {}, 0, None, pred_list_size, removed_field, remained_fields)
+    #return
 
-    logging.info('\nPerforming sim join')
-    topK_heap = [(-1, -1, -1)]
-    topK_heap = perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events, None, topK_heap, pred_list_size)
-
+    topK_heap, compared_dict = run_iteration(lrecord_list, rrecord_list, {}, 0, None, pred_list_size, -1, field_index_list)
     topK_heap = sorted(topK_heap, key=lambda tup: tup[0], reverse=True)
     #for tuple in topK_heap:
         #print tuple, list(ltable.ix[tuple[1]]), list(rtable.ix[tuple[2]])
     #    print tuple, list(lrecord_list[tuple[1]]), list(rrecord_list[tuple[2]])
-    logging.info('\nFinishing sim join')
+
+    #for field_index in field_index_list:
+    #    remained_fields = list(field_index_list)
+    #    remained_fields.remove(field_index)
+    #    run_iteration(lrecord_list, rrecord_list, compared_dict, 0, None, pred_list_size, field_index, remained_fields)
 
     return None
 
 
-def perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events, candidates, topK_heap, pred_list_size):
+def run_iteration(lrecord_list, rrecord_list,
+                  compared_set, lower_bound, candidates, pred_list_size, removed_field, remained_fields):
+    logging.info(('\nRecaculating the updated length of records'))
+    lrecord_length_list = calc_record_length(lrecord_list, remained_fields)
+    rrecord_length_list = calc_record_length(rrecord_list, remained_fields)
+
+    logging.info('\nGenerating prefix events')
+    #Generate prefix events
+    lprefix_events = []
+    rprefix_events = []
+    generate_prefix_events(lrecord_list, lrecord_length_list, lprefix_events, remained_fields, lower_bound)
+    generate_prefix_events(rrecord_list, rrecord_length_list, rprefix_events, remained_fields, lower_bound)
+    print removed_field, len(lprefix_events), len(rprefix_events)
+
+    logging.info('\n>>>Performing sim join>>>')
+    topK_heap = [(-1, -1, -1)]
+    topK_heap, new_compared_dict = perform_sim_join(lrecord_list, rrecord_list, lrecord_length_list, rrecord_length_list,
+                                 lprefix_events, rprefix_events, compared_set, candidates,
+                                 topK_heap, pred_list_size, removed_field, remained_fields)
+    logging.info('\n<<<Finishing sim join<<<')
+    topK_heap = sorted(topK_heap, key=lambda tup: tup[0], reverse=True)
+    #for tuple in topK_heap:
+        #print tuple, list(ltable.ix[tuple[1]]), list(rtable.ix[tuple[2]])
+    #    print tuple, list(lrecord_list[tuple[1]]), list(rrecord_list[tuple[2]])
+
+    return topK_heap, new_compared_dict
+
+
+def perform_sim_join(lrecord_list, rrecord_list, lrecord_length_list, rrecord_length_list, lprefix_events, rprefix_events,
+                     compared_set, candidates, topK_heap, pred_list_size, removed_field, remained_fields):
     inverted_index = {}
-    compared_dict = {}
+
+    # The compared dict for this new iteration
+    new_compared_dict = {}
+
     lvisited_tokens_index = {}
     compared_pairs = 0
+    ignored_pairs = 0
+    reused_pairs = 0
+    new_calculated_pairs = 0
     step_time = [0, 0, 0, 0]
     while len(lprefix_events) > 0 and topK_heap[0][0] < lprefix_events[0][0] * -1 :
     #while len(lprefix_events) > 0 and -100 < lprefix_events[0][0] * -1 :
@@ -163,7 +202,7 @@ def perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events,
         inc_inverted_index = {}
         while len(lprefix_events) > 0 and lprefix_events[0][0] >= rprefix_events[0][0]:
             r_pre_event = hq.heappop(rprefix_events)
-            key = rrecord_list[r_pre_event[1]][r_pre_event[2]]
+            key = rrecord_list[r_pre_event[1]][r_pre_event[2]][0]
             if key not in inc_inverted_index:
                 inc_inverted_index[key] = set()
             inc_inverted_index[key].add(r_pre_event[1])
@@ -179,93 +218,253 @@ def perform_sim_join(lrecord_list, rrecord_list, lprefix_events, rprefix_events,
                 inc_records = inc_inverted_index[key]
                 for lindex in lvisited_records:
                     for rindex in inc_records:
-                        if lindex in compared_dict and rindex in compared_dict[lindex]:
+                        #if lindex in compared_dict and rindex in compared_dict[lindex]:
+                        #    continue
+                        cur_record_pair = (lindex, rindex)
+                        if cur_record_pair in new_compared_dict:
                             continue
-                        jac_sim = token_based_jaccard(lrecord_list[lindex], rrecord_list[rindex])
-                        if len(topK_heap) == pred_list_size:
-                            hq.heappushpop(topK_heap, (jac_sim, lindex, rindex))
-                        else:
-                            hq.heappush(topK_heap, (jac_sim, lindex, rindex))
-                        if lindex in compared_dict:
-                            compared_dict[lindex].add(rindex)
-                        else:
-                            compared_dict[lindex] = set([rindex])
-                        compared_pairs = compared_pairs + 1
 
+                        if cur_record_pair in compared_set:
+                            '''The pair hasn't been compared, but compared in the upper level iteration'''
+                            reused_pairs += 1
+
+                            llen = lrecord_length_list[lindex]
+                            rlen = rrecord_length_list[rindex]
+                            old_result = compared_set[cur_record_pair]
+                            # if llen + rlen - old_result[0] == 0:
+                            #     print cur_record_pair
+                            #     print key
+                            #     print llen, rlen, old_result
+                            #     print lrecord_list[lindex]
+                            #     print rrecord_list[rindex]
+                            #     exit(0)
+
+                            sim_upper_bound = 1.0
+                            denom = llen + rlen - old_result[0]
+                            if denom > 0:
+                                sim_upper_bound = old_result[0] * 1.0 / denom
+                            if sim_upper_bound < topK_heap[0][0]:
+                                ignored_pairs += 1
+                                continue
+
+                            old_count = old_result[0]
+                            old_field_map = old_result[1].copy()
+                            for old_field in old_field_map.keys():
+                                if old_field == removed_field:
+                                    for matched_field in old_field_map[old_field]:
+                                        old_count -= old_field_map[old_field][matched_field]
+                                    old_field_map.pop(old_field)
+                                else:
+                                    if removed_field in old_field_map[old_field]:
+                                        old_count -= old_field_map[old_field].pop(removed_field)
+                            new_compared_dict[cur_record_pair] = (old_count, old_field_map)
+                            jac_sim = old_count * 1.0 / (llen + rlen - old_count)
+                            if len(topK_heap) == pred_list_size:
+                                hq.heappushpop(topK_heap, (jac_sim, lindex, rindex))
+                            else:
+                                hq.heappush(topK_heap, (jac_sim, lindex, rindex))
+                        else:
+                        #if True:
+                            '''The pair is not compared at all. Run the complete compair procedure'''
+                            new_calculated_pairs += 1
+
+                            cur_lrecord = lrecord_list[lindex]
+                            new_cur_lrecord = []
+                            for i in range(len(cur_lrecord)):
+                                if cur_lrecord[i][1] in remained_fields:
+                                    new_cur_lrecord.append(cur_lrecord[i])
+                            cur_rrecord = rrecord_list[rindex]
+                            new_cur_rrecord = []
+                            for i in range(len(cur_rrecord)):
+                                if cur_rrecord[i][1] in remained_fields:
+                                    new_cur_rrecord.append(cur_rrecord[i])
+
+                            jac_sim_tuple = token_based_jaccard(new_cur_lrecord, new_cur_rrecord)
+                            if len(topK_heap) == pred_list_size:
+                                hq.heappushpop(topK_heap, (jac_sim_tuple[0], lindex, rindex))
+                            else:
+                                hq.heappush(topK_heap, (jac_sim_tuple[0], lindex, rindex))
+                            #if l_pre_event[1] in compared_dict:
+                            #    compared_dict[l_pre_event[1]].add(r_index)
+                            #else:
+                            #    compared_dict[l_pre_event[1]] = set([r_index])
+                            new_compared_dict[cur_record_pair] = jac_sim_tuple[1]
+                        compared_pairs += 1
 
         while len(lprefix_events) > 0 and lprefix_events[0][0] < rprefix_events[0][0]:
             potential_match_set = set()
             l_pre_event = hq.heappop(lprefix_events)
-            new_token = lrecord_list[l_pre_event[1]][l_pre_event[2]]
+            new_token = lrecord_list[l_pre_event[1]][l_pre_event[2]][0]
             if new_token in lvisited_tokens_index:
                 lvisited_tokens_index[new_token].add(l_pre_event[1])
             else:
                 lvisited_tokens_index[new_token] = set([l_pre_event[1]])
-
             for i in range(l_pre_event[2] + 1):
-                token = lrecord_list[l_pre_event[1]][i]
+                token_tuple = lrecord_list[l_pre_event[1]][i]
+                if token_tuple[1] == removed_field:
+                    continue
+                token = token_tuple[0]
                 if token in inc_inverted_index:
                     potential_match_set = potential_match_set.union(inc_inverted_index[token])
-
             if new_token in inverted_index:
                 potential_match_set = potential_match_set.union(inverted_index[new_token])
-
             for r_index in potential_match_set:
-                if l_pre_event[1] in compared_dict and r_index in compared_dict[l_pre_event[1]]:
-                    continue
-                cur_time = [0, 0, 0]
-                cur_time[0] = time.clock()
-                jac_sim = token_based_jaccard(lrecord_list[l_pre_event[1]], rrecord_list[r_index])
-                cur_time[1] = time.clock()
-                if len(topK_heap) == pred_list_size:
-                    hq.heappushpop(topK_heap, (jac_sim, l_pre_event[1], r_index))
-                else:
-                    hq.heappush(topK_heap, (jac_sim, l_pre_event[1], r_index))
-                if l_pre_event[1] in compared_dict:
-                    compared_dict[l_pre_event[1]].add(r_index)
-                else:
-                    compared_dict[l_pre_event[1]] = set([r_index])
-                compared_pairs = compared_pairs + 1
-                if jac_sim > l_pre_event[0] * -1.0:
-                    print l_pre_event[0]* -1.0, jac_sim, l_pre_event, r_index, new_token
-                    print lrecord_list[l_pre_event[1]]
-                    print rrecord_list[r_index]
-                    print inc_inverted_index
-                cur_time[2] = time.clock()
-                for i in range(2):
-                    step_time[i] += (cur_time[i + 1] - cur_time[i])
+                #if l_pre_event[1] in compared_dict and r_index in compared_dict[l_pre_event[1]]:
+                #    continue
 
-        for key in inc_inverted_index:
-            if key in inverted_index:
-                inverted_index[key] = inverted_index[key].union(inc_inverted_index[key])
+                cur_record_pair = (l_pre_event[1], r_index)
+                if cur_record_pair in new_compared_dict:
+                    '''If the pair has been compared in the current iteration'''
+                    continue
+
+                if cur_record_pair in compared_set:
+                    '''The pair hasn't been compared, but compared in the upper level iteration'''
+                    reused_pairs += 1
+
+                    llen = lrecord_length_list[l_pre_event[1]]
+                    rlen = rrecord_length_list[r_index]
+                    old_result = compared_set[cur_record_pair]
+
+                    sim_upper_bound = 1.0
+                    denom = llen + rlen - old_result[0]
+                    if denom > 0:
+                        sim_upper_bound = old_result[0] * 1.0 / denom
+                    if sim_upper_bound < topK_heap[0][0]:
+                        ignored_pairs += 1
+                        continue
+
+                    old_count = old_result[0]
+                    old_field_map = old_result[1].copy()
+                    for key in old_field_map.keys():
+                        if key == removed_field:
+                            for matched_field in old_field_map[key]:
+                                old_count -= old_field_map[key][matched_field]
+                            old_field_map.pop(key)
+                        else:
+                            if removed_field in old_field_map[key]:
+                                old_count -= old_field_map[key].pop(removed_field)
+                    new_compared_dict[cur_record_pair] = (old_count, old_field_map)
+                    jac_sim = old_count * 1.0 / (llen + rlen - old_count)
+                    if len(topK_heap) == pred_list_size:
+                        hq.heappushpop(topK_heap, (jac_sim, l_pre_event[1], r_index))
+                    else:
+                        hq.heappush(topK_heap, (jac_sim, l_pre_event[1], r_index))
+                else:
+                #if True:
+                    '''The pair is not compared at all. Run the complete compair procedure'''
+                    new_calculated_pairs += 1
+                    cur_time = [0, 0, 0, 0, 0]
+
+                    cur_time[0] = time.clock()
+                    cur_lrecord = lrecord_list[l_pre_event[1]]
+                    new_cur_lrecord = []
+                    for i in range(len(cur_lrecord)):
+                        if cur_lrecord[i][1] != removed_field:
+                            new_cur_lrecord.append(cur_lrecord[i])
+                    cur_time[1] = time.clock()
+                    cur_rrecord = rrecord_list[r_index]
+                    new_cur_rrecord = []
+                    for i in range(len(cur_rrecord)):
+                        if cur_rrecord[i][1] != removed_field:
+                            new_cur_rrecord.append(cur_rrecord[i])
+                    cur_time[2] = time.clock()
+                    jac_sim_tuple = token_based_jaccard(new_cur_lrecord, new_cur_rrecord)
+                    cur_time[3] = time.clock()
+                    if len(topK_heap) == pred_list_size:
+                        hq.heappushpop(topK_heap, (jac_sim_tuple[0], l_pre_event[1], r_index))
+                    else:
+                        hq.heappush(topK_heap, (jac_sim_tuple[0], l_pre_event[1], r_index))
+                    #if l_pre_event[1] in compared_dict:
+                    #    compared_dict[l_pre_event[1]].add(r_index)
+                    #else:
+                    #    compared_dict[l_pre_event[1]] = set([r_index])
+                    new_compared_dict[cur_record_pair] = jac_sim_tuple[1]
+
+                    if jac_sim_tuple[0] > l_pre_event[0] * -1.0:
+                        print l_pre_event[0]* -1.0, jac_sim_tuple[0], l_pre_event, r_index, new_token
+                        print lrecord_list[l_pre_event[1]]
+                        print new_cur_lrecord
+                        print rrecord_list[r_index]
+                        print new_cur_rrecord
+                        #print inc_inverted_index
+                    cur_time[4] = time.clock()
+                    for i in range(4):
+                        step_time[i] += (cur_time[i + 1] - cur_time[i])
+
+                compared_pairs += 1
+
+
+        for inc_key in inc_inverted_index:
+            if inc_key in inverted_index:
+                inverted_index[inc_key] = inverted_index[inc_key].union(inc_inverted_index[inc_key])
             else:
-                inverted_index[key] = inc_inverted_index[key].copy()
+                inverted_index[inc_key] = inc_inverted_index[inc_key].copy()
         inc_inverted_index.clear()
 
-    print compared_pairs
+
+    print 'compared:', compared_pairs, 'ignored:', ignored_pairs, compared_pairs + ignored_pairs
+    print 'reused:', reused_pairs, 'new_calculated:', new_calculated_pairs, reused_pairs + new_calculated_pairs
     print step_time
-    return topK_heap
+    return topK_heap, new_compared_dict
 
 
 def token_based_jaccard(list1, list2):
-    set1 = set(list1)
-    set2 = set(list2)
-    return len(set1 & set2) * 1.0 / len(set1 | set2)
+    len1 = len(list1)
+    len2 = len(list2)
+
+    map1 = {}
+    for i in range(len1):
+        map1[list1[i][0]] = list1[i][1]
+
+    count = 0
+    result_map = {}
+    for i in range(len2):
+        if list2[i][0] in map1:
+            count += 1
+            lfield = map1[list2[i][0]]
+            rfield = list2[i][1]
+            if lfield in result_map:
+                if rfield in result_map[lfield]:
+                    result_map[lfield][rfield] += 1
+                else:
+                    result_map[lfield][rfield] = 1
+            else:
+                result_map[lfield] = {}
+                result_map[lfield][rfield] = 1
+
+    jac_sim = count * 1.0 / (len1 + len2 - count)
+
+    return jac_sim, (count, result_map)
 
 
-def generate_prefix_events(record_list, prefix_events):
+def calc_record_length(record_list, remained_fields):
+    record_length_list = []
     for i in range(len(record_list)):
-        length = len(record_list[i])
-        for j in range(length):
-            hq.heappush(prefix_events, (-1.0 * calc_threshold(j, length), i, j))
+        full_length = len(record_list[i])
+        actual_length = 0
+        for j in range(full_length):
+            if record_list[i][j][1] in remained_fields:
+                actual_length += 1
+        record_length_list.append(actual_length)
+
+    return record_length_list
+
+
+def generate_prefix_events(record_list, record_length_list, prefix_events, remained_fields, lower_bound):
+    for i in range(len(record_list)):
+        actual_length = record_length_list[i]
+        full_length = len(record_list[i])
+        count = 0
+        for j in range(full_length):
+            if record_list[i][j][1] in remained_fields :
+                threshold = calc_threshold(count, actual_length)
+                if threshold >= lower_bound:
+                    hq.heappush(prefix_events, (-1.0 * threshold, i, j, count, record_list[i][j][1], record_list[i][j]))
+                count += 1
 
 
 def calc_threshold(token_index, record_length):
     return 1 - token_index * 1.0 / record_length
-
-
-def get_token_order(tup):
-    return tup[1]
 
 
 def sort_record_tokens_by_global_order(record_list, order_dict):
@@ -273,12 +472,13 @@ def sort_record_tokens_by_global_order(record_list, order_dict):
         #tmp_record = [(token, order_dict[token]) for token in record_list[i]]
         #tmp_record = sorted(tmp_record, key=get_token_order)
         #record_list[i] = [tup[0] for tup in tmp_record]
-        record_list[i] = sorted(record_list[i], key=lambda x: order_dict[x])
+        record_list[i] = sorted(record_list[i], key=lambda x: order_dict[x[0]])
 
 
 def build_global_token_order(record_list, order_dict):
     for record in record_list:
-        for token in record:
+        for token_tuple in record:
+            token = token_tuple[0]
             if order_dict.has_key(token):
                 order_dict[token] = order_dict[token] + 1
             else:
@@ -286,15 +486,24 @@ def build_global_token_order(record_list, order_dict):
 
 
 def get_tokenized_record(record, feature_list):
-    token_list = set()
+    token_list = []
+    index_map = {}
+    field_count = 0
+
     for field in record[feature_list]:
         tmp_field = replace_nan_to_empty(field)
         '''TODO(hanli): we should remove the punctuation at the end of each token'''
         if tmp_field != '':
             tmp_list = list(tmp_field.lower().split(' '))
             for token in tmp_list:
-                token_list.add(token)
-    token_list = list(token_list)
+                if token != '':
+                    if token in index_map:
+                        token_list.append((token + '_' + str(index_map[token]), field_count))
+                        index_map[token] += 1
+                    else:
+                        token_list.append((token, field_count))
+                        index_map[token] = 1
+        field_count += 1
 
     return token_list
 
@@ -477,7 +686,7 @@ def main():
     #blocker = mg.AttrEquivalenceBlocker()
     #candidate_set = blocker.block_tables(ltable, rtable, 'pubYear', 'pubYear')
     candidate_set = MTable()
-    pred_table = naive_topK_debug_blocker(ltable, rtable, candidate_set)
+    pred_table = iterative_topK_debug_blocker(ltable, rtable, candidate_set)
 
 if __name__ == "__main__":
     main()

@@ -69,3 +69,17 @@ def update_old_field_matching_list(int old_count, old_list, remained_fields, int
             old_count -= tmp / offset_of_field_num
 
     return old_count, updated_list
+
+
+def get_new_matching_count(int old_count, old_list, remained_fields, int offset_of_field_num):
+    cdef int i, tmp
+    cdef int length = len(old_list)
+    cdef int count, lfield, rfield
+    for i in range(length):
+        tmp = old_list[i] / offset_of_field_num
+        rfield = old_list[i] % offset_of_field_num
+        lfield = tmp % offset_of_field_num
+        if lfield not in remained_fields or rfield not in remained_fields:
+            old_count -= tmp / offset_of_field_num
+
+    return old_count
